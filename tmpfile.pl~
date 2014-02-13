@@ -1,0 +1,31 @@
+if ($time_first == -1) { #まず、最初の行の時刻を区間最初の時刻として使用
+	    $time_first = $SERVER_time;
+
+	} elsif ($SERVER_time - $time_first >= $timer_calc) { #平均遅延算出
+	    #すべての送信元それぞれで遅延を算出
+	    printf("calcnum,${segment},");
+	    foreach $key_ipaddr ( sort keys %hash_addr) {
+		if($hash_addr{$key_ipaddr}{'num_packet'} > 0) {
+		    $hash_addr{$key_ipaddr}{$segment}{'ave_delay'} 
+		    = $hash_addr{$key_ipaddr}{'per_packet_delay_sum'}/$hash_addr{$key_ipaddr}{'num_packet'};
+		    printf("ip,${key_ipaddr},numpac,$hash_addr{$key_ipaddr}{'num_packet'},delaysum,$hash_addr{$key_ipaddr}{'per_packet_delay_sum'},delay,${hash_addr{$key_ipaddr}{$segment}{'ave_delay'}}\n");
+		}
+		
+		#初期化
+		$hash_addr{$key_ipaddr}{'per_packet_delay_sum'} = 0;
+		$hash_addr{$key_ipaddr}{'num_packet'}           = 0;
+	    }
+	    $segment++;
+	    if($exp_type eq "adapt") { 	# 可変周期は算出間隔更新
+		$timer_calc = $timerOneSection{$segment};
+
+	    }             #固定周期(stat)の場合は算出間隔固定値
+
+	    #算出が終わったらserver timeを新たに区間最初の時刻にする
+	    $time_first = $SERVER_time;
+	}
+
+	#送信周期
+#	@server_period  = split(/\./, $filename_field[5],2); #
+#	$SERVER_period  = $server_period[0];
+	

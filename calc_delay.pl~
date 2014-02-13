@@ -1,0 +1,219 @@
+#!/usr/bin/perl
+
+# CISPログ(受信データ)を入力ファイルとする
+# $ perl calc_delay_from_logger.pl (周期方式 static or adaptive) (基地局側のCISPログdir)/ (station側のログdir)/
+# 
+# [注意]実験用の送受信端末は、実験前後に時刻同期しければ、このプログラムから出力される遅延データは意味をなさないでしょう
+#       (recursive_XXX.plスクリプトは NICTのNTPサーバで時刻同期を取るようになっています)
+#        ただし、屋外実験など、ntpサーバと通信不可能な状況では遅延データは取れないと思います
+#        (GWを用意して実験開始前に時刻同期する方法もありますが)
+# 
+# [注意]　受信成功率算出タイミング　実験時の値を入力してください
+
+
+if ( scalar(@ARGV)<2  ) {
+   die "<Usage>: perl calc_delay_from_logger.pl (control type: adapt or stat)  (server log1: recv_packet ) (server log2 [if type is \"adapt\"] : recv_ratio ).\n";
+}
+
+#実験タイプ
+$exp_type = $ARGV[0]; 
+if ($exp_type eq "adapt" && scalar(@ARGV) != 3) {
+    die "<Usage>: perl calc_delay_from_logger.pl (control type: adapt or stat)  (server log1: recv_packet ) (server log2 [if type is \"adapt\"] : recv_ratio ).\n";
+}
+    
+
+#delay合計値
+$amount_delay          = 0.0;
+#補正delay
+$amount_delay_correct  = 0.0;
+
+#delay平均値
+$average_delay         = 0.0;
+$average_delay_correct = 0.0;
+
+
+# 使用アドレスを 192.168.30.XXX/24(有線 ) 192.168.50.XXX(無線)とする前提
+# ネットワークアドレス(3 bytes目にあたる部分)
+$WIRELESS_LAN_IF       = 50;
+$WIRED_LAN_IF          = 30;
+
+#ログファイルパス
+$logfile_pass          = "..";
+#送信側ログ保存ディレクトリ
+$client_logdir         = "client"
+#送信側ログファイル
+$client_logfilename    = "logfile_imageSender_sentData.log";
+
+#受信成功率算出までの画像転送回数
+$numSend = 10; 
+
+#平均遅延時間の算出間隔
+if($exp_type eq "stat") { 	# 固定周期の場合は算出間隔固定値
+    $calc_period = 10*$numSend;
+} else {
+    #設定周期を取得し、受信成功率算出間隔を取る
+    $recvRatio = $ARGV[1];
+    open IN, $recvRatio or die "cannot open $file ($!)";
+    chomp(@line = <IN>);
+
+    $segment = 1;
+
+    foreach (@line) {
+	@fields                  = split(/,+/, $_);
+	$timerOneSection{$segment} = $numSend*$fields[8]; #転送周期の設定
+	# printf("one segment %d : %.3lf\n"
+	# 	   ,$segment
+	# 	   ,$timerOneSection{$segment});
+	$segment++;
+    }
+    $max_segment = $segment-1;
+    close(IN);
+}
+
+
+#遅延算出フェーズ
+foreach $server_file (@ARGV) { 
+    #ノード毎の遅延時間格納用ハッシュ初期化（複数ファイル同時算出時を考慮）
+    %hash_addr = ();
+
+    open SERVER_IN, $server_file or die "cannot open $server_file ($!)";
+    chomp(@server_line = <SERVER_IN>);
+    
+    # ファイルパス XXX/YYY , XXX部分を抽出
+    @filename_field = split(/\//, $server_file);
+    $server_dir_name = $filename_field[0];
+
+    printf("filename %s\n", $server_file);
+
+    #受信成功率算出区間の最初の時刻を記録
+    $time_first = -1;
+    $segment    = 0;
+    
+    if($exp_type eq "stat") { 	# 固定周期の場合は算出間隔固定値
+	$timer_calc = $calc_period;
+    } else {
+	$timer_calc = $timerOneSection{$segment};
+    }
+
+    foreach ( @server_line ) {
+	s/[\r\n]//g;
+	@server_field  = split(/ +/, $_);
+	
+	#受信時刻
+	$SERVER_time      = $server_field[0];
+	if ($time_first == -1) {
+	    $time_first = $SERVER_time;
+	} elsif ($SERVER_time - $time_first >= $timer_cal) { #平均遅延算出タイミング
+	    #遅延時間を加算
+	    for () { #ipアドレス全部
+		$hash_addr{$SERVER_ipaddr}{$segment}{''} 
+		= $hash_addr{$SERVER_ipaddr}{'per_packet_delay'}/$hash_addr{$SERVER_ipaddr}{'num_packet'};
+		#受信パケット数のカウント
+		$hash_addr{$SERVER_ipaddr}{'num_packet'}        = 0;
+	    }
+	    $segment++;
+	    if($exp_type eq "adapt") { 	# 固定周期の場合は算出間隔固定値
+		$timer_calc = $timerOneSection{$segment};
+		#statの時は算出時刻固定
+	    }
+
+	}
+
+
+	#送信元IP
+	$SERVER_ipaddr    = $server_field[5];             #無線のIPが入る(XXX.XXX.50.XXX)
+	$SERVER_ipaddr    
+	    =~ s/.${WIRELESS_LAN_IF}./.${WIRED_LAN_IF}./; #有線のIPに置換(XXX.XXX.30.XXX)
+	# フレームシーケンス番号
+	$SERVER_image_sequence   = $server_field[7];
+	# パケットシーケンス番号
+	$SERVER_packet_sequence  = $server_field[9];
+
+	#送信周期
+#	@server_period  = split(/\./, $filename_field[5],2); #
+#	$SERVER_period  = $server_period[0];
+	
+        #対応するipaddrの送信ログファイルをオープン
+	$clinet_file = sprintf("${logfile_pass}/${client_logdir}_${SERVER_ipaddr}/${server_dir_name}/${client_logfilename}",
+			       $SERVER_ipaddr,
+			       $SERVER_nodes, 
+			       $SERVER_period,
+			       $SERVER_ipaddr);
+	open CLIENT_IN, $clinet_file or die "cannot open $clinet_file ($!)";
+	chomp(@clinet_line = <CLIENT_IN>);
+
+        # リストの探索
+	$ip_in_hash = 0;
+	if ( scalar(%hash_addr) == 0) { #ハッシュが空
+	    $ip_in_hash = 0;
+	} else {
+	    while (($key, $ref) = each(%hash_addr)) {
+		if ($key eq $SERVER_ipaddr) { #ハッシュの中にip発見
+		     $ip_in_hash = 1;
+		    last;
+		} 
+	    } 
+	}
+
+	# if($ip_in_hash == 0) { #ntpdateの端末毎のoffsetを記録し、遅延時間補正に使う
+	#     my @first_clinet_line = split(/ +/,$clinet_line[0]);
+	#     my $last       = $#clinet_line;
+	#     my @laclinet_line  = split(/ +/,$clinet_line[$last-1]);
+	#     my @ntp_line   = split(/ +/,$clinet_line[$last]);
+	#     my $start      = $firclinet_line[0];
+	#     my $end        = $laclinet_line[0];
+	#     my $ntp_offset = $ntp_line[9];
+	#     $hash_addr{$SERVER_ipaddr}{'offset'} = $offset = $ntp_offset/($end-$start); #送信端末での測定時刻1秒あたりのずれ
+	#     $hash_addr{$SERVER_ipaddr}{'start'}  = $start; #送信開始時刻(補正時刻はこの時刻を基準にする)
+	# } else { 
+	#     $offset = $ref->{'offset'};
+	#     $start  = $ref->{'start'};
+	# }
+	
+
+	foreach $one_line (@clinet_line) {		
+	    #行から改行消去
+	    s/[\r\n]//g;
+
+	    @client_field           = split(/ +/,$one_line);
+	    #シーケンス番号
+	    $CLIENT_image_sequence  = $client_field[5];
+	    $CLIENT_packet_sequence = $client_field[7];
+
+	    #画像シーケンス番号・パケット番号の検知
+	    if ( (${SERVER_image_sequence}  eq  ${CLIENT_image_sequence})
+		  ${SERVER_packet_sequence} eq  ${CLIENT_packet_sequence}) {
+
+		#送信時刻(送信側での時刻)
+		$CLIENT_time     = $clinet_field[0];
+		#遅延時間を加算
+		$hash_addr{$SERVER_ipaddr}{'per_packet_delay'} += $SERVER_time - $CLIENT_time;
+		#受信パケット数のカウント
+		$hash_addr{$SERVER_ipaddr}{'num_packet'}       += 1;
+
+                #ntpdateによる補正送信時刻
+		#$CLIENT_time_correct = $CLIENT_time + $offset*($CLIENT_time-$start);
+		#補正遅延
+		#$delay_correct   = $SERVER_time - $CLIENT_time_correct 		
+	    }
+	}
+	close CLIENT_IN;
+	
+    }
+    $average_delay         = $amount_delay/(scalar(@server_line));
+    $average_delay_correct = $amount_delay_correct/(scalar(@server_line));
+    @pass   = split(/\//,$file);
+    
+    printf ("%s,average_delay,%.3f,sec,average_delay_correct,%.3f,sec\n"
+	    ,$pass[$#pass]
+	    ,$average_delay
+	    ,$average_delay_correct);
+    
+    close SERVER_IN;
+}
+
+exit;
+
+
+
+
